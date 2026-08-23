@@ -1,0 +1,4 @@
+numpy==2.5.2
+demucs==4.1.0
+beat-this==1.1.0
+adtof-pytorch @ git+https://github.com/xavriley/ADTOF-pytorch.git@85c192e78f716ea0b111cc8a5ee4a8f6a3a4f8a9
