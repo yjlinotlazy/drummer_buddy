@@ -1,4 +1,8 @@
 from pathlib import Path
+import math
+import shutil
+import struct
+import wave
 
 import pytest
 
@@ -41,6 +45,46 @@ def test_local_import_duplicate_archive_and_restore(library: Library, tmp_path: 
         library.import_local(str(source))
     restored = library.set_archived(song["id"], False)
     assert restored["archived"] is False
+
+
+def test_register_local_keeps_source_in_place_and_uses_filename_as_title(library: Library, tmp_path: Path) -> None:
+    source = tmp_path / "recorded-song.wav"
+    source.write_bytes(b"recorded audio")
+
+    song = library.register_local(str(source))
+
+    assert song["title"] == "recorded-song"
+    assert song["source_path"] == str(source)
+    assert library.media_path(song["id"]) == source
+    assert not (tmp_path / "songs" / song["id"] / "source" / source.name).exists()
+
+    store = JobStore(library.database, library.config)
+    assert store.source_path(song["id"]) == source
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is required")
+def test_trim_preview_does_not_change_source_until_commit(library: Library, tmp_path: Path) -> None:
+    source = tmp_path / "recording.wav"
+    rate = 8000
+    samples = [0] * rate
+    samples += [int(10000 * math.sin(2 * math.pi * 440 * index / rate)) for index in range(rate)]
+    samples += [0] * rate
+    with wave.open(str(source), "wb") as audio:
+        audio.setparams((1, 2, rate, 0, "NONE", "not compressed"))
+        audio.writeframes(b"".join(struct.pack("<h", sample) for sample in samples))
+    original = source.read_bytes()
+    song = library.register_local(str(source))
+
+    preview = library.create_trim_preview(song["id"])
+
+    assert preview.is_file()
+    assert source.read_bytes() == original
+    with wave.open(str(preview), "rb") as audio:
+        assert audio.getnframes() < rate * 2
+
+    library.apply_trim_preview(song["id"])
+    assert source.read_bytes() != original
+    assert not preview.exists()
 
 
 def test_youtube_lifecycle(library: Library) -> None:

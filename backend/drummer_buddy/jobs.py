@@ -115,8 +115,9 @@ class JobStore:
             raise SongNotFoundError(song_id)
         if not row["source_path"]:
             raise JobError("song has no local source")
-        path = (self.config.library_dir / row["source_path"]).resolve()
-        if not path.is_relative_to(self.config.library_dir) or not path.is_file():
+        stored_path = Path(row["source_path"])
+        path = stored_path.resolve() if stored_path.is_absolute() else (self.config.library_dir / stored_path).resolve()
+        if not path.is_file():
             raise JobError("local source is unavailable")
         return path
 

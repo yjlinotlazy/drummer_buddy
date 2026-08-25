@@ -205,7 +205,7 @@ function defaultRecordingName(): string {
   const now = new Date();
   const date = now.toISOString().slice(0, 10);
   const time = now.toTimeString().slice(0, 5).replace(":", "-");
-  return `recording-${date}-${time}.wav`;
+  return `recording-${date}-${time}`;
 }
 
 function Recorder({ onAdded }: { onAdded: (song: Song) => void }) {
@@ -283,7 +283,7 @@ function Recorder({ onAdded }: { onAdded: (song: Song) => void }) {
       <div className="recorder-actions">
         <button className="primary" disabled={busy || status?.running || !directory.trim() || !songName.trim()} onClick={() => void recorderAction("start")}>Start recording</button>
         <button disabled={busy || !status?.running} onClick={() => void recorderAction("stop")}>Stop</button>
-        <button disabled={busy || !canClean} onClick={() => void cleanRecorded()}>Clean recorded</button>
+        <button disabled={busy || !canClean} onClick={() => void cleanRecorded()}>Add to library</button>
       </div>
     </section>
   );
@@ -497,6 +497,34 @@ function EditSong({ song, onSaved, onClose }: { song: Song; onSaved: (song: Song
   const [artist, setArtist] = useState(song.artist);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [trimPreview, setTrimPreview] = useState("");
+
+  async function previewTrim() {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api<{ url: string }>(`/api/songs/${song.id}/trim-preview`, { method: "POST" });
+      setTrimPreview(`${result.url}?v=${Date.now()}`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not create preview");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function commitTrim() {
+    setBusy(true);
+    setError("");
+    try {
+      const updated = await api<Song>(`/api/songs/${song.id}/trim-commit`, { method: "POST" });
+      setTrimPreview("");
+      onSaved(updated);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not apply trim");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -522,6 +550,21 @@ function EditSong({ song, onSaved, onClose }: { song: Song; onSaved: (song: Song
         <form onSubmit={submit}>
           <label>Title <input autoFocus required value={title} onChange={(event) => setTitle(event.target.value)} /></label>
           <label>Artist <input value={artist} onChange={(event) => setArtist(event.target.value)} /></label>
+          {song.source_type === "local" && (
+            <div className="trim-editor">
+              <h3>Trim silence / 去掉首尾空白</h3>
+              <p>Original</p>
+              <audio controls src={`/api/songs/${song.id}/media?variant=original`} />
+              <button className="primary" disabled={busy} onClick={() => void previewTrim()} type="button">Generate preview</button>
+              {trimPreview && (
+                <>
+                  <p>Preview — the original is still unchanged</p>
+                  <audio controls src={trimPreview} />
+                  <button className="primary" disabled={busy} onClick={() => void commitTrim()} type="button">Use this trimmed audio</button>
+                </>
+              )}
+            </div>
+          )}
           {error && <p className="error" role="alert">{error}</p>}
           <button className="primary" disabled={busy}>{busy ? "Saving…" : "Save"}</button>
         </form>

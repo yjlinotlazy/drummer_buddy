@@ -260,7 +260,7 @@ def create_app() -> FastAPI:
     async def clean_recording() -> dict:
         try:
             path = recorder_manager().completed_path()
-            song = services()[1].import_local(str(path), path.stem)
+            song = services()[1].register_local(str(path))
             recorder_manager().mark_imported(song["id"])
             return song
         except DuplicateSongError as error:
@@ -274,6 +274,36 @@ def create_app() -> FastAPI:
             return services()[1].update_song(song_id, request.title, request.artist)
         except SongNotFoundError as error:
             raise HTTPException(status_code=404, detail="song not found") from error
+        except LibraryError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.post("/api/songs/{song_id}/trim-preview", status_code=201)
+    async def create_trim_preview(song_id: str) -> dict:
+        try:
+            services()[1].create_trim_preview(song_id)
+            return {"url": f"/api/songs/{song_id}/trim-preview/media"}
+        except SongNotFoundError as error:
+            raise HTTPException(status_code=404, detail="song not found") from error
+        except LibraryError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.get("/api/songs/{song_id}/trim-preview/media")
+    async def trim_preview_media(song_id: str, request: Request) -> Response:
+        try:
+            return media_response(services()[1].trim_preview_path(song_id), request.headers.get("range"))
+        except SongNotFoundError as error:
+            raise HTTPException(status_code=404, detail="song not found") from error
+        except LibraryError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.post("/api/songs/{song_id}/trim-commit")
+    async def commit_trim_preview(song_id: str) -> dict:
+        try:
+            return services()[1].apply_trim_preview(song_id)
+        except SongNotFoundError as error:
+            raise HTTPException(status_code=404, detail="song not found") from error
+        except DuplicateSongError as error:
+            raise duplicate_response(error) from error
         except LibraryError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
 

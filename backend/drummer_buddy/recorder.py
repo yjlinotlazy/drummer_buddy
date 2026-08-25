@@ -8,7 +8,6 @@ import shutil
 import signal
 import subprocess
 from threading import Lock
-from typing import IO
 
 from .config import Config
 
@@ -22,17 +21,11 @@ class RecorderManager:
         self.config = config
         self._lock = Lock()
         self._process: subprocess.Popen[bytes] | None = None
-        self._log_file: IO[bytes] | None = None
         self._path: Path | None = None
         self._started_at: str | None = None
         self._exit_code: int | None = None
         self._error: str | None = None
         self._imported_song_id: str | None = None
-
-    def _close_log(self) -> None:
-        if self._log_file is not None:
-            self._log_file.close()
-            self._log_file = None
 
     def _refresh(self) -> None:
         if self._process is None:
@@ -42,11 +35,8 @@ class RecorderManager:
             return
         self._exit_code = exit_code
         self._process = None
-        self._close_log()
-        if exit_code != 0 and self._path is not None:
-            log_path = self._path.with_suffix(".arecord.log")
-            detail = log_path.read_text(encoding="utf-8", errors="replace")[-2000:].strip() if log_path.is_file() else ""
-            self._error = detail or f"arecord exited with status {exit_code}"
+        if exit_code != 0:
+            self._error = f"arecord exited with status {exit_code}"
 
     def status(self) -> dict:
         with self._lock:
@@ -81,21 +71,18 @@ class RecorderManager:
             if path.exists():
                 raise RecorderError(f"recording already exists: {path}")
 
-            log_file = path.with_suffix(".arecord.log").open("wb")
             try:
                 process = subprocess.Popen(
                     ["arecord", "-D", self.config.recording_device, "-f", "cd", str(path)],
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
-                    stderr=log_file,
+                    stderr=subprocess.DEVNULL,
                     start_new_session=True,
                 )
             except OSError as error:
-                log_file.close()
                 raise RecorderError(f"could not start arecord: {error}") from error
 
             self._process = process
-            self._log_file = log_file
             self._path = path
             self._started_at = datetime.now(UTC).isoformat()
             self._exit_code = None
@@ -134,7 +121,6 @@ class RecorderManager:
                 process.wait(timeout=2)
             self._exit_code = process.returncode
             self._process = None
-            self._close_log()
             self._error = "arecord did not stop cleanly" if forced else None
             return self.status_unlocked()
 
@@ -168,4 +154,3 @@ class RecorderManager:
                     process.kill()
                     process.wait()
                 self._refresh()
-            self._close_log()

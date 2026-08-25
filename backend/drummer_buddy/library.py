@@ -4,7 +4,9 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -81,6 +83,14 @@ def complete_local_path(value: str, limit: int = 40) -> list[dict]:
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def file_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source_file:
+        while chunk := source_file.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def parse_youtube_id(value: str) -> str:
@@ -202,6 +212,110 @@ class Library:
         finally:
             incoming.unlink(missing_ok=True)
 
+    def register_local(self, source_value: str, artist: str = "") -> dict:
+        """Add an existing file to the library without copying it."""
+        source = Path(source_value).expanduser().resolve()
+        if not source.exists() or not source.is_file():
+            raise LibraryError("source path must be a readable regular file")
+        if source.suffix.lower() not in SUPPORTED_EXTENSIONS:
+            raise LibraryError("supported formats are MP3, WAV, FLAC, and MP4")
+
+        digest = hashlib.sha256()
+        with source.open("rb") as source_file:
+            while chunk := source_file.read(1024 * 1024):
+                digest.update(chunk)
+        duplicate = self._find_duplicate("content_hash", digest.hexdigest())
+        if duplicate:
+            error = ArchivedDuplicateError if duplicate["archived"] else DuplicateSongError
+            raise error(duplicate)
+
+        song_id = str(uuid4())
+        timestamp = utc_now()
+        with self.database.connect() as connection:
+            connection.execute(
+                """INSERT INTO songs
+                   (id, title, artist, source_type, source_path, content_hash,
+                    original_filename, archived, created_at, updated_at)
+                   VALUES (?, ?, ?, 'local', ?, ?, ?, 0, ?, ?)""",
+                (
+                    song_id,
+                    source.stem,
+                    artist.strip(),
+                    str(source),
+                    digest.hexdigest(),
+                    source.name,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        return self.get_song(song_id)
+
+    def _source_file_path(self, song: dict) -> Path:
+        stored_path = Path(song["source_path"])
+        path = stored_path.resolve() if stored_path.is_absolute() else (self.config.library_dir / stored_path).resolve()
+        if not path.is_file():
+            raise LibraryError("local media is unavailable")
+        return path
+
+    def create_trim_preview(self, song_id: str) -> Path:
+        song = self.get_song(song_id)
+        if song["source_type"] != "local":
+            raise LibraryError("this song has no local media")
+        source = self._source_file_path(song)
+        if source.suffix.lower() != ".wav":
+            raise LibraryError("silence trimming currently supports WAV recordings only")
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg is None:
+            raise LibraryError("ffmpeg is not installed")
+        preview_dir = self.config.library_dir / ".previews"
+        preview_dir.mkdir(exist_ok=True)
+        preview = preview_dir / f"{song_id}.wav"
+        temporary = preview.with_suffix(".part.wav")
+        trim_leading = "silenceremove=start_periods=1:start_duration=0.1:start_threshold=-50dB"
+        audio_filter = f"{trim_leading},areverse,{trim_leading},areverse"
+        result = subprocess.run(
+            [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(source), "-af", audio_filter,
+             "-c:a", "pcm_s16le", str(temporary)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0 or not temporary.is_file():
+            temporary.unlink(missing_ok=True)
+            raise LibraryError(result.stderr.strip() or "could not create trim preview")
+        temporary.replace(preview)
+        return preview
+
+    def trim_preview_path(self, song_id: str) -> Path:
+        self.get_song(song_id)
+        preview = self.config.library_dir / ".previews" / f"{song_id}.wav"
+        if not preview.is_file():
+            raise LibraryError("create a trim preview first")
+        return preview
+
+    def apply_trim_preview(self, song_id: str) -> dict:
+        song = self.get_song(song_id)
+        source = self._source_file_path(song)
+        preview = self.trim_preview_path(song_id)
+        digest = file_digest(preview)
+        duplicate = self._find_duplicate("content_hash", digest)
+        if duplicate and duplicate["id"] != song_id:
+            error = ArchivedDuplicateError if duplicate["archived"] else DuplicateSongError
+            raise error(duplicate)
+
+        replacement = source.with_name(f".{source.name}.{uuid4()}.part")
+        try:
+            shutil.copyfile(preview, replacement)
+            os.replace(replacement, source)
+        finally:
+            replacement.unlink(missing_ok=True)
+        preview.unlink(missing_ok=True)
+        with self.database.connect() as connection:
+            connection.execute(
+                "UPDATE songs SET content_hash = ?, updated_at = ? WHERE id = ?",
+                (digest, utc_now(), song_id),
+            )
+        return self.get_song(song_id)
+
     def add_youtube(self, value: str, title: str | None = None, artist: str = "") -> dict:
         video_id = parse_youtube_id(value)
         duplicate = self._find_duplicate("youtube_id", video_id)
@@ -257,9 +371,7 @@ class Library:
         elif variant == "drumless":
             raise LibraryError("drumless audio is not ready")
         else:
-            path = (self.config.library_dir / song["source_path"]).resolve()
-        if not path.is_relative_to(self.config.library_dir) or not path.is_file():
-            raise LibraryError("local media is unavailable")
+            path = self._source_file_path(song)
         return path
 
     def result_asset_path(self, song_id: str, job_type: str, asset: str) -> Path | None:
