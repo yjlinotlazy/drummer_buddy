@@ -305,7 +305,7 @@ function Player({ song, onClose }: { song: Song; onClose: () => void }) {
   const [playerError, setPlayerError] = useState("");
   const [outputBusy, setOutputBusy] = useState(false);
   const audioRef = useRef<HTMLAudioElement>(null);
-  const serverStart = useRef({ position: 0, autoplay: true });
+  const serverStart = useRef({ position: 0, autoplay: false });
 
   const applyServerStatus = useCallback((status: ServerPlayerStatus) => {
     setPosition(status.position);
@@ -370,7 +370,7 @@ function Player({ song, onClose }: { song: Song; onClose: () => void }) {
     const audio = audioRef.current;
     try {
       if (next === "server") {
-        serverStart.current = { position: audio?.currentTime || position, autoplay: audio ? !audio.paused : true };
+        serverStart.current = { position: audio?.currentTime || position, autoplay: audio ? !audio.paused : false };
         if (audio) audio.muted = true;
         setOutput("server");
       } else {
@@ -458,7 +458,6 @@ function Player({ song, onClose }: { song: Song; onClose: () => void }) {
           <audio
             ref={audioRef}
             className="audio-player"
-            autoPlay
             loop={loopSong}
             muted={output === "server"}
             src={`/api/songs/${song.id}/media?variant=${variant}`}
@@ -695,7 +694,11 @@ function App() {
             {songs.map((song, index) => (
               <div className="song-entry" key={song.id}>
                 <article className="song-card">
-                  <button className="song-main" onClick={() => setSelected(song)}>
+                  <button
+                    className="song-main"
+                    aria-expanded={selected?.id === song.id}
+                    onClick={() => setSelected((current) => current?.id === song.id ? null : song)}
+                  >
                     <span className="track-number">{String(index + 1).padStart(2, "0")}</span>
                     <span className={`source-badge ${song.source_type}`}>{song.source_type === "youtube" ? "YT" : "FILE"}</span>
                     <span className="song-copy"><strong>{song.title}</strong><small>{song.artist || song.original_filename || "Unknown artist"}</small></span>
