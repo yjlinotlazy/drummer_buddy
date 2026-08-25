@@ -13,6 +13,7 @@ class Config:
     host: str = "127.0.0.1"
     port: int = 7005
     recording_dir: Path | None = None
+    drumless_dir: Path | None = None
     recording_device: str = "pulse"
     drumless_format: str = "flac"
     analysis_python: Path | None = None
@@ -36,6 +37,7 @@ def load_config(path: Path | None = None) -> Config:
             "library_dir": str(Path.home() / "Music" / "Drummer Buddy"),
             "server": {"host": "127.0.0.1", "port": 7005},
             "recording_dir": str(Path.home() / "Music" / "Drummer Buddy Recordings"),
+            "drumless_dir": str(Path.home() / "Music" / "Drummer Buddy" / "drumless"),
             "recording_device": "pulse",
             "drumless_format": "flac",
             "analysis_python": str(project_root / ".analysis-venv" / "bin" / "python"),
@@ -47,8 +49,8 @@ def load_config(path: Path | None = None) -> Config:
         raise ValueError(f"library_dir is required in {config_path}")
     server = raw.get("server") or {}
     output_format = str(raw.get("drumless_format", "flac")).lower()
-    if output_format not in {"flac", "wav"}:
-        raise ValueError("drumless_format must be flac or wav")
+    if output_format not in {"flac", "wav", "mp3"}:
+        raise ValueError("drumless_format must be flac, wav, or mp3")
 
     default_analysis_python = Path(__file__).resolve().parents[2] / ".analysis-venv" / "bin" / "python"
     config = Config(
@@ -56,13 +58,18 @@ def load_config(path: Path | None = None) -> Config:
         host=str(server.get("host", "127.0.0.1")),
         port=int(server.get("port", 7005)),
         recording_dir=Path(raw.get("recording_dir", Path(raw["library_dir"]) / "recordings")).expanduser().absolute(),
+        drumless_dir=Path(raw.get("drumless_dir", Path(raw["library_dir"]) / "drumless")).expanduser().absolute(),
         recording_device=str(raw.get("recording_device", "pulse")),
         drumless_format=output_format,
-        analysis_python=Path(raw.get("analysis_python", default_analysis_python)).expanduser().resolve(),
+        # Do not resolve this path: virtualenv Python executables are commonly
+        # symlinks, and following the link bypasses the virtualenv's packages.
+        analysis_python=Path(raw.get("analysis_python", default_analysis_python)).expanduser().absolute(),
     )
     config.library_dir.mkdir(parents=True, exist_ok=True)
     (config.library_dir / ".incoming").mkdir(exist_ok=True)
     (config.library_dir / "songs").mkdir(exist_ok=True)
     assert config.recording_dir is not None
     config.recording_dir.mkdir(parents=True, exist_ok=True)
+    assert config.drumless_dir is not None
+    config.drumless_dir.mkdir(parents=True, exist_ok=True)
     return config

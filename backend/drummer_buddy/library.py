@@ -164,55 +164,9 @@ class Library:
         return song_dict(row) if row else None
 
     def import_local(self, source_value: str, title: str | None = None, artist: str = "") -> dict:
-        source = Path(source_value).expanduser().resolve()
-        if not source.exists() or not source.is_file():
-            raise LibraryError("source path must be a readable regular file")
-        if source.suffix.lower() not in SUPPORTED_EXTENSIONS:
-            raise LibraryError("supported formats are MP3, WAV, FLAC, and MP4")
+        return self.register_local(source_value, title, artist)
 
-        incoming = self.config.library_dir / ".incoming" / f"{uuid4()}.part"
-        digest = hashlib.sha256()
-        try:
-            with source.open("rb") as source_file, incoming.open("xb") as target_file:
-                while chunk := source_file.read(1024 * 1024):
-                    target_file.write(chunk)
-                    digest.update(chunk)
-            content_hash = digest.hexdigest()
-            duplicate = self._find_duplicate("content_hash", content_hash)
-            if duplicate:
-                error = ArchivedDuplicateError if duplicate["archived"] else DuplicateSongError
-                raise error(duplicate)
-
-            song_id = str(uuid4())
-            song_dir = self.config.library_dir / "songs" / song_id
-            source_dir = song_dir / "source"
-            source_dir.mkdir(parents=True)
-            destination = source_dir / source.name
-            incoming.replace(destination)
-            relative_path = destination.relative_to(self.config.library_dir).as_posix()
-            timestamp = utc_now()
-            with self.database.connect() as connection:
-                connection.execute(
-                    """INSERT INTO songs
-                       (id, title, artist, source_type, source_path, content_hash,
-                        original_filename, archived, created_at, updated_at)
-                       VALUES (?, ?, ?, 'local', ?, ?, ?, 0, ?, ?)""",
-                    (
-                        song_id,
-                        (title or source.stem).strip() or source.stem,
-                        artist.strip(),
-                        relative_path,
-                        content_hash,
-                        source.name,
-                        timestamp,
-                        timestamp,
-                    ),
-                )
-            return self.get_song(song_id)
-        finally:
-            incoming.unlink(missing_ok=True)
-
-    def register_local(self, source_value: str, artist: str = "") -> dict:
+    def register_local(self, source_value: str, title: str | None = None, artist: str = "") -> dict:
         """Add an existing file to the library without copying it."""
         source = Path(source_value).expanduser().resolve()
         if not source.exists() or not source.is_file():
@@ -239,7 +193,7 @@ class Library:
                    VALUES (?, ?, ?, 'local', ?, ?, ?, 0, ?, ?)""",
                 (
                     song_id,
-                    source.stem,
+                    (title or source.stem).strip() or source.stem,
                     artist.strip(),
                     str(source),
                     digest.hexdigest(),
@@ -388,8 +342,14 @@ class Library:
         filename = result.get("manifest", {}).get("files", {}).get(asset)
         if not filename:
             return None
-        path = (self.config.library_dir / result["directory"] / filename).resolve()
-        if not path.is_relative_to(self.config.library_dir) or not path.is_file():
+        result_dir = Path(result["directory"])
+        stored_file = Path(filename)
+        path = (
+            stored_file
+            if stored_file.is_absolute()
+            else (result_dir if result_dir.is_absolute() else self.config.library_dir / result_dir) / stored_file
+        ).resolve()
+        if not path.is_file():
             return None
         return path
 

@@ -135,8 +135,11 @@ class JobStore:
         filename = result["manifest"]["files"].get("drums")
         if not filename:
             return None
-        path = (self.config.library_dir / result["directory"] / filename).resolve()
-        return path if path.is_relative_to(self.config.library_dir) and path.is_file() else None
+        result_dir = Path(result["directory"])
+        stored_file = Path(filename)
+        path = stored_file if stored_file.is_absolute() else (result_dir if result_dir.is_absolute() else self.config.library_dir / result_dir) / stored_file
+        path = path.resolve()
+        return path if path.is_file() else None
 
     def begin(self, job_id: str) -> bool:
         with self.database.connect() as connection:
@@ -305,6 +308,17 @@ class JobManager:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             final_dir.parent.mkdir(parents=True, exist_ok=True)
             temp_dir.replace(final_dir)
+            if job["job_type"] == "drumless":
+                assert self.store.config.drumless_dir is not None
+                generated_name = manifest.get("files", {}).get("drumless")
+                if not generated_name:
+                    raise JobError("worker did not produce drumless audio")
+                generated_path = final_dir / generated_name
+                source_stem = self.store.source_path(job["song_id"]).stem
+                drumless_path = self.store.config.drumless_dir / f"{source_stem}_drumless{generated_path.suffix}"
+                generated_path.replace(drumless_path)
+                manifest["files"]["drumless"] = str(drumless_path)
+                (final_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
             self.store.finish(job_id, "succeeded", result={"directory": str(final_dir.relative_to(self.store.config.library_dir)), "manifest": manifest})
         except Exception as error:
             current = self.store.get(job_id)

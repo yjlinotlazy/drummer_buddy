@@ -35,6 +35,8 @@ def test_local_import_duplicate_archive_and_restore(library: Library, tmp_path: 
     source.write_bytes(b"fake audio")
     song = library.import_local(str(source), "Song", "Artist")
     assert song["source_type"] == "local"
+    assert song["source_path"] == str(source)
+    assert not (tmp_path / "songs" / song["id"] / "source" / source.name).exists()
     assert library.media_path(song["id"]).read_bytes() == b"fake audio"
 
     with pytest.raises(DuplicateSongError):

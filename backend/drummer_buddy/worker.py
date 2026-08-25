@@ -62,8 +62,8 @@ def run_drumless(input_path: Path, output_dir: Path, analysis_python: Path, para
     if not analysis_python.is_file():
         raise RuntimeError(f"analysis Python does not exist: {analysis_python}")
     output_format = str(parameters.get("format", "flac")).lower()
-    if output_format not in {"flac", "wav"}:
-        raise RuntimeError("drumless format must be flac or wav")
+    if output_format not in {"flac", "wav", "mp3"}:
+        raise RuntimeError("drumless format must be flac, wav, or mp3")
 
     original = output_dir / "original.flac"
     run_command(
@@ -102,7 +102,12 @@ def run_drumless(input_path: Path, output_dir: Path, analysis_python: Path, para
         "drums-cache", 0.82, 0.88,
     )
     drumless = output_dir / f"drumless.{output_format}"
-    codec = ["-c:a", "flac"] if output_format == "flac" else ["-c:a", "pcm_s24le"]
+    codecs = {
+        "flac": ["-c:a", "flac"],
+        "wav": ["-c:a", "pcm_s24le"],
+        "mp3": ["-c:a", "libmp3lame", "-b:a", "320k"],
+    }
+    codec = codecs[output_format]
     run_command(
         [
             "ffmpeg", "-hide_banner", "-loglevel", "warning",
