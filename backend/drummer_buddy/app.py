@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 from contextlib import asynccontextmanager
 from functools import lru_cache
 import json
@@ -29,6 +30,10 @@ class LocalImport(BaseModel):
     artist: str = ""
 
 
+class PracticeData(BaseModel):
+    logs: dict[str, list[str]] = Field(default_factory=dict)
+
+
 class YouTubeImport(BaseModel):
     url: str
     title: str | None = None
@@ -38,6 +43,7 @@ class YouTubeImport(BaseModel):
 class SongUpdate(BaseModel):
     title: str
     artist: str = ""
+    tags: list[str] = Field(default_factory=list)
 
 
 class JobCreate(BaseModel):
@@ -62,6 +68,11 @@ class ServerPlayerLoad(BaseModel):
 class ServerPlayerCommand(BaseModel):
     action: str
     value: float | bool | None = None
+
+
+class MetronomeSettings(BaseModel):
+    bpm: int = Field(ge=30, le=240)
+    beats: int = Field(ge=2, le=8)
 
 
 def requested_byte_range(value: str | None, size: int) -> tuple[int, int] | None:
@@ -165,6 +176,50 @@ def duplicate_response(error: DuplicateSongError) -> HTTPException:
     )
 
 
+PRACTICE_CSV = Path("/home/yli/Dropbox/Music/DrumBuddyPractice/practice.csv")
+ITEMS_CSV = PRACTICE_CSV.with_name("items.csv")
+
+
+def read_practice() -> dict[str, list[str]]:
+    if not PRACTICE_CSV.is_file():
+        return {}
+    logs: dict[str, list[str]] = {}
+    with PRACTICE_CSV.open(newline="", encoding="utf-8") as stream:
+        for row in csv.DictReader(stream):
+            if row.get("date") and row.get("exercise"):
+                logs.setdefault(row["date"], []).append(row["exercise"])
+    return logs
+
+
+def write_practice(logs: dict[str, list[str]]) -> None:
+    PRACTICE_CSV.parent.mkdir(parents=True, exist_ok=True)
+    temporary = PRACTICE_CSV.with_suffix(".csv.tmp")
+    with temporary.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=["date", "exercise"])
+        writer.writeheader()
+        for date in sorted(logs):
+            for exercise in logs[date]:
+                writer.writerow({"date": date, "exercise": exercise})
+    temporary.replace(PRACTICE_CSV)
+
+
+def read_items() -> list[str]:
+    if not ITEMS_CSV.is_file():
+        return []
+    with ITEMS_CSV.open(newline="", encoding="utf-8") as stream:
+        return [row["item"] for row in csv.DictReader(stream) if row.get("item")]
+
+
+def write_items(items: list[str]) -> None:
+    ITEMS_CSV.parent.mkdir(parents=True, exist_ok=True)
+    temporary = ITEMS_CSV.with_suffix(".csv.tmp")
+    with temporary.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=["item"])
+        writer.writeheader()
+        writer.writerows({"item": item} for item in items)
+    temporary.replace(ITEMS_CSV)
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="Drummer Buddy", version="0.1.0", lifespan=lifespan)
     app.add_middleware(
@@ -178,6 +233,37 @@ def create_app() -> FastAPI:
     async def health() -> dict:
         config, _ = services()
         return {"status": "ok", "library_dir": str(config.library_dir)}
+
+    @app.get("/api/metronome")
+    async def get_metronome() -> dict:
+        with services()[1].database.connect() as connection:
+            row = connection.execute("SELECT value_json FROM app_settings WHERE key = 'metronome'").fetchone()
+        return json.loads(row["value_json"]) if row else {"bpm": 100, "beats": 4}
+
+    @app.put("/api/metronome")
+    async def save_metronome(request: MetronomeSettings) -> dict:
+        value = request.model_dump_json()
+        with services()[1].database.connect() as connection:
+            connection.execute("INSERT INTO app_settings(key, value_json) VALUES('metronome', ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json", (value,))
+        return request.model_dump()
+
+    @app.get("/api/practice")
+    async def get_practice() -> dict[str, list[str]]:
+        return read_practice()
+
+    @app.put("/api/practice")
+    async def save_practice(request: PracticeData) -> dict[str, list[str]]:
+        write_practice(request.logs)
+        return request.logs
+
+    @app.get("/api/practice/items")
+    async def get_practice_items() -> list[str]:
+        return read_items()
+
+    @app.put("/api/practice/items")
+    async def save_practice_items(items: list[str]) -> list[str]:
+        write_items(items)
+        return items
 
     @app.get("/api/files/complete")
     async def complete_file_path(path: str = Query("")) -> list[dict]:
@@ -271,11 +357,18 @@ def create_app() -> FastAPI:
     @app.patch("/api/songs/{song_id}")
     async def update_song(song_id: str, request: SongUpdate) -> dict:
         try:
-            return services()[1].update_song(song_id, request.title, request.artist)
+            return services()[1].update_song(song_id, request.title, request.artist, request.tags)
         except SongNotFoundError as error:
             raise HTTPException(status_code=404, detail="song not found") from error
         except LibraryError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.delete("/api/songs/{song_id}", status_code=204)
+    async def delete_song(song_id: str) -> None:
+        try:
+            services()[1].delete_song(song_id)
+        except SongNotFoundError as error:
+            raise HTTPException(status_code=404, detail="song not found") from error
 
     @app.post("/api/songs/{song_id}/trim-preview", status_code=201)
     async def create_trim_preview(song_id: str) -> dict:

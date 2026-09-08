@@ -178,6 +178,8 @@ class ServerPlayer:
             elif action == "loop":
                 self._loop = bool(value)
                 self._send(["set_property", "loop-file", "inf" if self._loop else "no"])
+            elif action == "volume":
+                self._send(["set_property", "volume", max(0, min(200, float(value or 0)))])
             elif action == "stop":
                 self._stop_unlocked()
                 return self._status_unlocked()

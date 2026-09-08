@@ -11,6 +11,7 @@ type Song = {
   original_filename: string | null;
   archived: boolean;
   assets: { drumless: boolean; score: boolean };
+  tags: string[];
 };
 
 type ApiError = { detail?: string | { message?: string; code?: string; song?: Song } };
@@ -49,6 +50,8 @@ type ServerPlayerStatus = {
 
 type PathSuggestion = { path: string; is_dir: boolean };
 
+type PracticeLog = Record<string, string[]>;
+
 function commonPrefix(values: string[]): string {
   if (values.length === 0) return "";
   let prefix = values[0];
@@ -56,6 +59,147 @@ function commonPrefix(values: string[]): string {
     while (prefix && !value.startsWith(prefix)) prefix = prefix.slice(0, -1);
   }
   return prefix;
+}
+
+function titleFromPath(path: string): string {
+  const filename = path.split(/[\\/]/).pop() || "";
+  const stem = filename.replace(/\.[^.]+$/, "");
+  return stem.replace(/_+/g, " ").trim().split(/\s+/).filter(Boolean)
+    .map((word) => word[0].toLocaleUpperCase() + word.slice(1).toLocaleLowerCase())
+    .join(" ");
+}
+
+function localDateKey(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function Practice() {
+  const today = new Date();
+  const [month, setMonth] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
+  const [selectedDate, setSelectedDate] = useState(localDateKey(today));
+  const [logs, setLogs] = useState<PracticeLog>(() => {
+    try { return JSON.parse(localStorage.getItem("drummer-buddy-practice") || "{}"); } catch { return {}; }
+  });
+  const [loaded, setLoaded] = useState(false);
+  const [itemsLoaded, setItemsLoaded] = useState(false);
+  const [exercises, setExercises] = useState(() => {
+    const defaults = ["lifetime", "paradiddle", "playalong"];
+    try {
+      const saved = JSON.parse(localStorage.getItem("drummer-buddy-exercises") || "[]");
+      return [...defaults, ...saved.filter((item: unknown): item is string => typeof item === "string" && !defaults.includes(item))];
+    } catch { return defaults; }
+  });
+
+  useEffect(() => {
+    void api<PracticeLog>("/api/practice").then((saved) => {
+      if (Object.keys(saved).length) setLogs(saved);
+      setLoaded(true);
+    }).catch(() => setLoaded(true));
+  }, []);
+  useEffect(() => {
+    if (!loaded) return;
+    localStorage.setItem("drummer-buddy-practice", JSON.stringify(logs));
+    void api<PracticeLog>("/api/practice", { method: "PUT", body: JSON.stringify({ logs }) }).catch(() => undefined);
+  }, [logs, loaded]);
+  useEffect(() => localStorage.setItem("drummer-buddy-exercises", JSON.stringify(exercises.filter((item) => !["lifetime", "paradiddle", "playalong"].includes(item)))), [exercises]);
+  useEffect(() => {
+    void api<string[]>("/api/practice/items").then((saved) => {
+      if (saved.length) setExercises((current) => [...current.filter((item) => ["lifetime", "paradiddle", "playalong"].includes(item)), ...saved]);
+      setItemsLoaded(true);
+    }).catch(() => setItemsLoaded(true));
+  }, []);
+  useEffect(() => {
+    if (!itemsLoaded) return;
+    const custom = exercises.filter((item) => !["lifetime", "paradiddle", "playalong"].includes(item));
+    void api<string[]>("/api/practice/items", { method: "PUT", body: JSON.stringify(custom) }).catch(() => undefined);
+  }, [exercises, itemsLoaded]);
+
+  const firstDay = new Date(month.getFullYear(), month.getMonth(), 1);
+  const daysInMonth = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
+  const offset = (firstDay.getDay() + 6) % 7;
+  const cells = Array.from({ length: offset + daysInMonth }, (_, index) => index < offset ? null : index - offset + 1);
+  const selected = logs[selectedDate] || [];
+  function toggleExercise(name: string) {
+    setLogs((current) => {
+      const existing = current[selectedDate] || [];
+      const next = existing.includes(name) ? existing.filter((item) => item !== name) : [...existing, name];
+      return { ...current, [selectedDate]: next };
+    });
+  }
+  function addExercise() {
+    const name = window.prompt("练习项目名称");
+    if (name?.trim() && !exercises.includes(name.trim())) setExercises((current) => [...current, name.trim()]);
+  }
+
+  return (
+    <section className="practice-panel">
+      <div className="section-heading"><h2>练习</h2><span>练习追踪</span></div>
+      <div className="practice-calendar-heading">
+        <button onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() - 1, 1))} type="button">‹</button>
+        <strong>{month.getFullYear()}年{month.getMonth() + 1}月</strong>
+        <button onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() + 1, 1))} type="button">›</button>
+      </div>
+      <div className="practice-weekdays">{["一", "二", "三", "四", "五", "六", "日"].map((day) => <span key={day}>{day}</span>)}</div>
+      <div className="practice-calendar">
+        {cells.map((day, index) => {
+          if (!day) return <span className="practice-day empty" key={`empty-${index}`} />;
+          const key = localDateKey(new Date(month.getFullYear(), month.getMonth(), day));
+          return <button className={`practice-day ${key === selectedDate ? "selected" : ""} ${logs[key]?.length ? "checked" : ""}`} key={key} onClick={() => setSelectedDate(key)} type="button"><b>{day}</b>{logs[key]?.length ? <small>✓</small> : null}</button>;
+        })}
+      </div>
+      <div className="practice-detail">
+        <div className="practice-detail-heading"><h3>{selectedDate} 练习记录</h3><button onClick={addExercise} type="button">＋ 添加项目</button></div>
+        {exercises.map((exercise) => <label className="practice-item" key={exercise}><input checked={selected.includes(exercise)} onChange={() => toggleExercise(exercise)} type="checkbox" />{exercise}</label>)}
+      </div>
+    </section>
+  );
+}
+
+function Metronome() {
+  const [bpm, setBpm] = useState(100);
+  const [beats, setBeats] = useState(4);
+  const [running, setRunning] = useState(false);
+  const [beat, setBeat] = useState(-1);
+  const [loaded, setLoaded] = useState(false);
+  const timer = useRef<number | null>(null);
+  const audio = useRef<AudioContext | null>(null);
+
+  useEffect(() => { void api<{ bpm: number; beats: number }>("/api/metronome").then((settings) => { setBpm(settings.bpm); setBeats(settings.beats); setLoaded(true); }).catch(() => setLoaded(true)); }, []);
+  useEffect(() => { if (loaded) void api("/api/metronome", { method: "PUT", body: JSON.stringify({ bpm, beats }) }).catch(() => undefined); }, [bpm, beats, loaded]);
+
+  useEffect(() => () => { if (timer.current !== null) window.clearInterval(timer.current); void audio.current?.close(); }, []);
+  function click(nextBeat: number) {
+    if (!audio.current) audio.current = new AudioContext();
+    const oscillator = audio.current.createOscillator();
+    const gain = audio.current.createGain();
+    oscillator.frequency.value = nextBeat === 0 ? 1100 : 750;
+    gain.gain.setValueAtTime(0.18, audio.current.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audio.current.currentTime + 0.06);
+    oscillator.connect(gain).connect(audio.current.destination);
+    oscillator.start(); oscillator.stop(audio.current.currentTime + 0.07);
+  }
+  function toggle() {
+    if (running) {
+      if (timer.current !== null) window.clearInterval(timer.current);
+      timer.current = null; setRunning(false); setBeat(-1); return;
+    }
+    const tick = (next: number) => { setBeat(next); click(next); };
+    tick(0); timer.current = window.setInterval(() => setBeat((current) => { const next = (current + 1) % beats; click(next); return next; }), 60000 / bpm);
+    setRunning(true);
+  }
+  useEffect(() => {
+    if (!running) return;
+    if (timer.current !== null) window.clearInterval(timer.current);
+    timer.current = window.setInterval(() => setBeat((current) => { const next = (current + 1) % beats; click(next); return next; }), 60000 / bpm);
+    return () => { if (timer.current !== null) window.clearInterval(timer.current); };
+  }, [bpm, beats, running]);
+  return <section className="metronome-panel">
+    <div className="section-heading"><h2>节拍器</h2><span>练习工具</span></div>
+    <div className="metronome-beats">{Array.from({ length: beats }, (_, index) => <i className={index === beat ? "active" : ""} key={index} />)}</div>
+    <output className="bpm-display">{bpm}<small>BPM</small></output>
+    <label className="bpm-control">速度 <input type="range" min="30" max="240" value={bpm} onChange={(event) => setBpm(Number(event.target.value))} /></label>
+    <div className="metronome-options"><label>拍号 <select value={beats} onChange={(event) => setBeats(Number(event.target.value))}>{[2, 3, 4, 5, 6, 7, 8].map((value) => <option key={value} value={value}>{value}/4</option>)}</select></label><button className="primary" onClick={toggle}>{running ? "暂停" : "开始"}</button></div>
+  </section>;
 }
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
@@ -81,6 +225,7 @@ function AddSong({ onAdded }: { onAdded: (song: Song) => void }) {
   const [pathFocused, setPathFocused] = useState(false);
   const [suggestions, setSuggestions] = useState<PathSuggestion[]>([]);
   const [selectedSuggestion, setSelectedSuggestion] = useState(-1);
+  const autoTitle = useRef("");
 
   useEffect(() => {
     void api<{ path: string }>("/api/files/default").then(({ path }) => {
@@ -88,6 +233,15 @@ function AddSong({ onAdded }: { onAdded: (song: Song) => void }) {
       setSource((current) => current || path);
     }).catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    const inferred = titleFromPath(source);
+    setTitle((current) => {
+      if (current && current !== autoTitle.current) return current;
+      autoTitle.current = inferred;
+      return inferred;
+    });
+  }, [source]);
 
   useEffect(() => {
     if (!pathFocused) return;
@@ -147,6 +301,7 @@ function AddSong({ onAdded }: { onAdded: (song: Song) => void }) {
       setSource(defaultPath);
       setSuggestions([]);
       setTitle("");
+      autoTitle.current = "";
       setArtist("");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not add song");
@@ -201,17 +356,10 @@ function AddSong({ onAdded }: { onAdded: (song: Song) => void }) {
   );
 }
 
-function defaultRecordingName(): string {
-  const now = new Date();
-  const date = now.toISOString().slice(0, 10);
-  const time = now.toTimeString().slice(0, 5).replace(":", "-");
-  return `recording-${date}-${time}`;
-}
-
 function Recorder({ onAdded }: { onAdded: (song: Song) => void }) {
   const [status, setStatus] = useState<RecorderStatus | null>(null);
   const [directory, setDirectory] = useState("");
-  const [songName, setSongName] = useState(defaultRecordingName);
+  const [songName, setSongName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -254,7 +402,7 @@ function Recorder({ onAdded }: { onAdded: (song: Song) => void }) {
       const song = await api<Song>("/api/recorder/clean", { method: "POST" });
       onAdded(song);
       setMessage(`Added ${song.title} to the library.`);
-      setSongName(defaultRecordingName());
+      setSongName("");
       await loadStatus();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not clean recording");
@@ -297,15 +445,38 @@ function preciseTime(value: number): string {
 
 function Player({ song, onClose }: { song: Song; onClose: () => void }) {
   const [variant, setVariant] = useState<"original" | "drumless" | null>(song.assets.drumless ? null : "original");
-  const [output, setOutput] = useState<"device" | "server">("device");
+  const [output, setOutput] = useState<"device" | "server">(() => (
+    typeof window !== "undefined" && window.matchMedia("(max-width: 640px)").matches ? "server" : "device"
+  ));
   const [position, setPosition] = useState(0);
   const [duration, setDuration] = useState(0);
   const [loopSong, setLoopSong] = useState(false);
+  const [volume, setVolume] = useState(1);
   const [playing, setPlaying] = useState(false);
   const [playerError, setPlayerError] = useState("");
   const [outputBusy, setOutputBusy] = useState(false);
   const audioRef = useRef<HTMLAudioElement>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const gainNodeRef = useRef<GainNode | null>(null);
+  const mediaSourceRef = useRef<MediaElementAudioSourceNode | null>(null);
   const serverStart = useRef({ position: 0, autoplay: false });
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    if (!audioContextRef.current) audioContextRef.current = new AudioContext();
+    if (!mediaSourceRef.current) {
+      mediaSourceRef.current = audioContextRef.current.createMediaElementSource(audio);
+      gainNodeRef.current = audioContextRef.current.createGain();
+      mediaSourceRef.current.connect(gainNodeRef.current).connect(audioContextRef.current.destination);
+    }
+    gainNodeRef.current!.gain.value = volume;
+    void audioContextRef.current.resume().catch(() => undefined);
+  }, [variant, volume]);
+
+  useEffect(() => () => {
+    void audioContextRef.current?.close();
+  }, []);
 
   const applyServerStatus = useCallback((status: ServerPlayerStatus) => {
     setPosition(status.position);
@@ -484,6 +655,22 @@ function Player({ song, onClose }: { song: Song; onClose: () => void }) {
             <button className={loopSong ? "active" : ""} aria-pressed={loopSong} onClick={toggleLoop} type="button">Loop song</button>
             <output>{preciseTime(position)} / {preciseTime(duration)}</output>
           </div>
+          <label className="volume-control">Volume
+            <input
+              aria-label="Playback volume"
+              min="0"
+              max="2"
+              onChange={(event) => {
+                const next = Number(event.target.value);
+                setVolume(next);
+                if (output === "server") void sendServerCommand("volume", next * 100);
+              }}
+              step="0.01"
+              type="range"
+              value={volume}
+            />
+            <span>{Math.round(volume * 100)}%</span>
+          </label>
           {playerError && <p className="error" role="alert">{playerError}</p>}
         </div>
       )}
@@ -495,6 +682,7 @@ function Player({ song, onClose }: { song: Song; onClose: () => void }) {
 function EditSong({ song, onSaved, onClose }: { song: Song; onSaved: (song: Song) => void; onClose: () => void }) {
   const [title, setTitle] = useState(song.title);
   const [artist, setArtist] = useState(song.artist);
+  const [tags, setTags] = useState((song.tags || []).join(", "));
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [trimPreview, setTrimPreview] = useState("");
@@ -533,7 +721,7 @@ function EditSong({ song, onSaved, onClose }: { song: Song; onSaved: (song: Song
     try {
       const updated = await api<Song>(`/api/songs/${song.id}`, {
         method: "PATCH",
-        body: JSON.stringify({ title, artist }),
+        body: JSON.stringify({ title, artist, tags: tags.split(",").map((tag) => tag.trim()).filter(Boolean) }),
       });
       onSaved(updated);
     } catch (caught) {
@@ -550,6 +738,7 @@ function EditSong({ song, onSaved, onClose }: { song: Song; onSaved: (song: Song
         <form onSubmit={submit}>
           <label>Title <input autoFocus required value={title} onChange={(event) => setTitle(event.target.value)} /></label>
           <label>Artist <input value={artist} onChange={(event) => setArtist(event.target.value)} /></label>
+          <label>Tags <input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="rock, warmup" /><small>用逗号分隔</small></label>
           {song.source_type === "local" && (
             <div className="trim-editor">
               <h3>Trim silence / 去掉首尾空白</h3>
@@ -633,37 +822,28 @@ function Tasks() {
 
 function App() {
   const [songs, setSongs] = useState<Song[]>([]);
-  const [mode, setMode] = useState<"library" | "utils" | "archive" | "tasks">("library");
+  const [mode, setMode] = useState<"library" | "utils" | "tasks" | "practice" | "metronome">("library");
   const [selected, setSelected] = useState<Song | null>(null);
   const [editing, setEditing] = useState<Song | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [detailed, setDetailed] = useState(false);
+  const [tagFilter, setTagFilter] = useState("");
 
-  const archived = mode === "archive";
   const loadSongs = useCallback(async () => {
-    if (mode === "tasks") return;
+    if (mode === "tasks" || mode === "practice" || mode === "metronome") return;
     setLoading(true);
     setError("");
     try {
-      setSongs(await api<Song[]>(`/api/songs?archived=${archived}`));
+      setSongs(await api<Song[]>('/api/songs?archived=false'));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not load library");
     } finally {
       setLoading(false);
     }
-  }, [archived, mode]);
+  }, [mode]);
 
   useEffect(() => { void loadSongs(); }, [loadSongs]);
-
-  async function toggleArchive(song: Song) {
-    try {
-      await api(`/api/songs/${song.id}/${song.archived ? "restore" : "archive"}`, { method: "POST" });
-      setSongs((current) => current.filter((item) => item.id !== song.id));
-      if (selected?.id === song.id) setSelected(null);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not update song");
-    }
-  }
 
   async function generateDrumless(song: Song) {
     try {
@@ -677,15 +857,14 @@ function App() {
     }
   }
 
-  async function generateScore(song: Song) {
+  async function deleteSong(song: Song) {
+    if (!window.confirm(`删除「${song.title}」？此操作不可撤销。`)) return;
     try {
-      await api<Job>("/api/jobs", {
-        method: "POST",
-        body: JSON.stringify({ song_id: song.id, job_type: "score" }),
-      });
-      setMode("tasks");
+      await api(`/api/songs/${song.id}`, { method: "DELETE" });
+      setSongs((current) => current.filter((item) => item.id !== song.id));
+      setEditing(null);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not start score task");
+      setError(caught instanceof Error ? caught.message : "Could not delete song");
     }
   }
 
@@ -694,11 +873,12 @@ function App() {
       <header>
         <div className="brand-mark" aria-hidden="true">DB</div>
         <div><span className="eyebrow">DRUMMER BUDDY</span><h1>Your backing room</h1></div>
-        <nav className="header-nav desktop-only">
+        <nav className="header-nav">
           <button className={mode === "library" ? "active" : ""} onClick={() => setMode("library")}>Library</button>
           <button className={mode === "utils" ? "active" : ""} onClick={() => setMode("utils")}>Utils</button>
           <button className={mode === "tasks" ? "active" : ""} onClick={() => setMode("tasks")}>Tasks</button>
-          <button className={mode === "archive" ? "active" : ""} onClick={() => setMode("archive")}>Archive</button>
+          <button className={`practice-nav ${mode === "practice" ? "active" : ""}`} onClick={() => setMode("practice")}>练习</button>
+          <button className={`metronome-nav ${mode === "metronome" ? "active" : ""}`} onClick={() => setMode("metronome")}>节拍器</button>
         </nav>
       </header>
 
@@ -716,9 +896,10 @@ function App() {
                     <button className="song-main" onClick={() => setEditing(song)}>
                       <span className="track-number">{String(index + 1).padStart(2, "0")}</span>
                       <span className={`source-badge ${song.source_type}`}>{song.source_type === "youtube" ? "YT" : "FILE"}</span>
-                      <span className="song-copy"><strong>{song.title}</strong><small>{song.artist || song.original_filename || "Unknown artist"}</small></span>
+                      <span className="song-copy"><strong>{song.title}</strong><small>{song.artist || song.original_filename || "Unknown artist"}</small><small className="song-extra">{song.tags?.length ? `Tags: ${song.tags.join(", ")}` : "No tags"}</small></span>
                       <span className="play-mark">Edit</span>
                     </button>
+                    <button className="delete-action" onClick={() => void deleteSong(song)} type="button">删除</button>
                   </article>
                 ))}
               </div>
@@ -727,14 +908,18 @@ function App() {
         </>
       )}
 
-      {mode === "tasks" ? <Tasks /> : mode === "utils" ? null : <section className="library">
-        <div className="section-heading"><h2>{archived ? "Archive" : "Library"}</h2><span>{songs.length} {songs.length === 1 ? "track" : "tracks"}</span></div>
+      {mode === "practice" && <Practice />}
+      {mode === "metronome" && <Metronome />}
+
+      {mode === "tasks" ? <Tasks /> : mode === "utils" || mode === "practice" ? null : <section className="library">
+        <div className="section-heading"><h2>Library</h2><span>{songs.length} {songs.length === 1 ? "track" : "tracks"}</span></div>
+        <div className="library-controls"><label>Tag <select value={tagFilter} onChange={(event) => setTagFilter(event.target.value)}><option value="">全部</option>{[...new Set(songs.flatMap((song) => song.tags || []))].sort().map((tag) => <option key={tag} value={tag}>{tag}</option>)}</select></label><button onClick={() => setDetailed((current) => !current)} type="button">{detailed ? "简洁" : "详细"}</button></div>
         {error && <p className="error" role="alert">{error}</p>}
         {loading ? <p className="empty">Loading…</p> : songs.length === 0 ? (
-          <p className="empty">{archived ? "Nothing archived." : "Add a YouTube link or local song to start playing."}</p>
+          <p className="empty">Add a YouTube link or local song to start playing.</p>
         ) : (
           <div className="song-grid">
-            {songs.map((song, index) => (
+            {songs.filter((song) => !tagFilter || (song.tags || []).includes(tagFilter)).map((song, index) => (
               <div className="song-entry" key={song.id}>
                 <article className="song-card">
                   <button
@@ -744,16 +929,12 @@ function App() {
                   >
                     <span className="track-number">{String(index + 1).padStart(2, "0")}</span>
                     <span className={`source-badge ${song.source_type}`}>{song.source_type === "youtube" ? "YT" : "FILE"}</span>
-                    <span className="song-copy"><strong>{song.title}</strong><small>{song.artist || song.original_filename || "Unknown artist"}</small></span>
+                    <span className="song-copy"><strong>{song.title}</strong><small>{song.artist || song.original_filename || "Unknown artist"}</small>{detailed && <small className="song-extra">{song.tags?.length ? `Tags: ${song.tags.join(", ")}` : "No tags"} · {song.source_type}</small>}</span>
                     <span className="play-mark">▶</span>
                   </button>
                   {!song.archived && song.source_type === "local" && !song.assets.drumless && (
                     <button className="archive-action desktop-only" onClick={() => void generateDrumless(song)}>Make drumless</button>
                   )}
-                  {!song.archived && song.source_type === "local" && !song.assets.score && (
-                    <button className="archive-action desktop-only" onClick={() => void generateScore(song)}>Make score</button>
-                  )}
-                  <button className="archive-action desktop-only" onClick={() => void toggleArchive(song)}>{song.archived ? "Restore" : "Archive"}</button>
                 </article>
                 {selected?.id === song.id && <Player song={selected} onClose={() => setSelected(null)} />}
               </div>

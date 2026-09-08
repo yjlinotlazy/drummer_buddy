@@ -8,7 +8,7 @@ import pytest
 
 from drummer_buddy.config import Config
 from drummer_buddy.database import Database
-from drummer_buddy.library import ArchivedDuplicateError, DuplicateSongError, Library, LibraryError, parse_youtube_id
+from drummer_buddy.library import ArchivedDuplicateError, DuplicateSongError, Library, LibraryError, parse_youtube_id, title_from_filename
 from drummer_buddy.jobs import JobStore
 
 
@@ -28,6 +28,10 @@ def test_youtube_url_parsing() -> None:
     assert parse_youtube_id("https://youtube.com/shorts/dQw4w9WgXcQ") == "dQw4w9WgXcQ"
     with pytest.raises(LibraryError):
         parse_youtube_id("https://example.com/not-youtube")
+
+
+def test_title_from_filename() -> None:
+    assert title_from_filename(Path("come_as_YOU_are.wav")) == "Come As You Are"
 
 
 def test_local_import_duplicate_archive_and_restore(library: Library, tmp_path: Path) -> None:
@@ -55,7 +59,7 @@ def test_register_local_keeps_source_in_place_and_uses_filename_as_title(library
 
     song = library.register_local(str(source))
 
-    assert song["title"] == "recorded-song"
+    assert song["title"] == "Recorded-song"
     assert song["source_path"] == str(source)
     assert library.media_path(song["id"]) == source
     assert not (tmp_path / "songs" / song["id"] / "source" / source.name).exists()

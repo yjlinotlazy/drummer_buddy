@@ -93,6 +93,11 @@ def file_digest(path: Path) -> str:
     return digest.hexdigest()
 
 
+def title_from_filename(path: Path) -> str:
+    words = re.sub(r"_+", " ", path.stem).split()
+    return " ".join(word[:1].upper() + word[1:].lower() for word in words)
+
+
 def parse_youtube_id(value: str) -> str:
     candidate = value.strip()
     if YOUTUBE_ID.fullmatch(candidate):
@@ -116,6 +121,7 @@ def parse_youtube_id(value: str) -> str:
 def song_dict(row: sqlite3.Row) -> dict:
     result = dict(row)
     result["archived"] = bool(result["archived"])
+    result["tags"] = json.loads(result.pop("tags_json", "[]"))
     return result
 
 
@@ -193,7 +199,7 @@ class Library:
                    VALUES (?, ?, ?, 'local', ?, ?, ?, 0, ?, ?)""",
                 (
                     song_id,
-                    (title or source.stem).strip() or source.stem,
+                    (title or title_from_filename(source)).strip() or source.stem,
                     artist.strip(),
                     str(source),
                     digest.hexdigest(),
@@ -287,14 +293,14 @@ class Library:
             )
         return self.get_song(song_id)
 
-    def update_song(self, song_id: str, title: str, artist: str) -> dict:
+    def update_song(self, song_id: str, title: str, artist: str, tags: list[str]) -> dict:
         clean_title = title.strip()
         if not clean_title:
             raise LibraryError("title cannot be empty")
         with self.database.connect() as connection:
             result = connection.execute(
-                "UPDATE songs SET title = ?, artist = ?, updated_at = ? WHERE id = ?",
-                (clean_title, artist.strip(), utc_now(), song_id),
+                "UPDATE songs SET title = ?, artist = ?, tags_json = ?, updated_at = ? WHERE id = ?",
+                (clean_title, artist.strip(), json.dumps(tags, ensure_ascii=False), utc_now(), song_id),
             )
         if result.rowcount == 0:
             raise SongNotFoundError(song_id)
@@ -312,6 +318,14 @@ class Library:
         if result.rowcount == 0:
             raise SongNotFoundError(song_id)
         return self.get_song(song_id)
+
+    def delete_song(self, song_id: str) -> None:
+        with self.database.connect() as connection:
+            exists = connection.execute("SELECT 1 FROM songs WHERE id = ?", (song_id,)).fetchone()
+            if exists is None:
+                raise SongNotFoundError(song_id)
+            connection.execute("DELETE FROM analysis_jobs WHERE song_id = ?", (song_id,))
+            connection.execute("DELETE FROM songs WHERE id = ?", (song_id,))
 
     def media_path(self, song_id: str, variant: str = "original") -> Path:
         song = self.get_song(song_id)

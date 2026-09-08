@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS songs (
     archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    tags_json TEXT NOT NULL DEFAULT '[]',
     CHECK (
         (source_type = 'local' AND source_path IS NOT NULL AND content_hash IS NOT NULL)
         OR (source_type = 'youtube' AND youtube_id IS NOT NULL)
@@ -48,6 +49,11 @@ CREATE TABLE IF NOT EXISTS analysis_jobs (
 );
 CREATE INDEX IF NOT EXISTS analysis_jobs_status_created ON analysis_jobs(status, created_at);
 CREATE INDEX IF NOT EXISTS analysis_jobs_song_created ON analysis_jobs(song_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value_json TEXT NOT NULL
+);
 """
 
 
@@ -65,3 +71,6 @@ class Database:
     def initialize(self) -> None:
         with self.connect() as connection:
             connection.executescript(SCHEMA)
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(songs)")}
+            if "tags_json" not in columns:
+                connection.execute("ALTER TABLE songs ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'")
