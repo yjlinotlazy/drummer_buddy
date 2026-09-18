@@ -9,4 +9,5 @@ frontend/dist/
 frontend/*.tsbuildinfo
 frontend/vite.config.js
 frontend/vite.config.d.ts
+server_logs/
 .DS_Store

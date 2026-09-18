@@ -155,50 +155,87 @@ function Practice() {
   );
 }
 
+const tempoSections = [
+  { name: "Largo", chinese: "广板", min: 30, max: 55, angle: -112 },
+  { name: "Adagio", chinese: "慢板", min: 56, max: 75, angle: -67 },
+  { name: "Andante", chinese: "行板", min: 76, max: 108, angle: -22 },
+  { name: "Moderato", chinese: "中板", min: 109, max: 120, angle: 22 },
+  { name: "Allegro", chinese: "快板", min: 121, max: 168, angle: 67 },
+  { name: "Presto", chinese: "急板", min: 169, max: 240, angle: 112 },
+];
+
+function tempoSection(bpm: number) {
+  return tempoSections.find((section) => bpm <= section.max) || tempoSections[tempoSections.length - 1];
+}
+
+function TempoKnob({ value, onChange }: { value: number; onChange: (value: number) => void }) {
+  const knob = useRef<HTMLDivElement | null>(null);
+  const update = (event: React.PointerEvent<HTMLDivElement>) => {
+    const bounds = knob.current?.getBoundingClientRect();
+    if (!bounds) return;
+    const radians = Math.atan2(event.clientX - (bounds.left + bounds.width / 2), -(event.clientY - (bounds.top + bounds.height / 2)));
+    const angle = Math.max(-135, Math.min(135, radians * 180 / Math.PI));
+    onChange(Math.round(30 + ((angle + 135) / 270) * 210));
+  };
+  const pointerAngle = -135 + ((value - 30) / 210) * 270;
+  return <div className="tempo-knob-wrap">
+    <div className="tempo-knob" ref={knob} onPointerDown={(event) => { knob.current?.setPointerCapture(event.pointerId); update(event); }} onPointerMove={(event) => { if (event.buttons) update(event); }} role="slider" aria-label="速度旋钮" aria-valuemin={30} aria-valuemax={240} aria-valuenow={value} tabIndex={0}>
+      <div className="tempo-knob-mark" style={{ transform: `rotate(${pointerAngle}deg)` }} />
+      <span className="tempo-knob-value">{value}</span>
+    </div>
+    <div className="tempo-labels">{tempoSections.map((section) => <span key={section.name} style={{ transform: `rotate(${section.angle}deg) translateY(-92px) rotate(${-section.angle}deg)` }} className={section.name === tempoSection(value).name ? "active" : ""}>{section.name}<small>{section.chinese}</small></span>)}</div>
+  </div>;
+}
+
 function Metronome() {
   const [bpm, setBpm] = useState(100);
+  const [bpmInput, setBpmInput] = useState("100");
   const [beats, setBeats] = useState(4);
+  const [volume, setVolume] = useState(100);
   const [running, setRunning] = useState(false);
   const [beat, setBeat] = useState(-1);
   const [loaded, setLoaded] = useState(false);
   const timer = useRef<number | null>(null);
-  const audio = useRef<AudioContext | null>(null);
+  const [error, setError] = useState("");
+  const section = tempoSection(bpm);
+  const changeBpm = (next: number) => {
+    const corrected = Math.max(30, Math.min(240, Math.round(next)));
+    setBpm(corrected);
+    setBpmInput(String(corrected));
+  };
 
-  useEffect(() => { void api<{ bpm: number; beats: number }>("/api/metronome").then((settings) => { setBpm(settings.bpm); setBeats(settings.beats); setLoaded(true); }).catch(() => setLoaded(true)); }, []);
-  useEffect(() => { if (loaded) void api("/api/metronome", { method: "PUT", body: JSON.stringify({ bpm, beats }) }).catch(() => undefined); }, [bpm, beats, loaded]);
+  useEffect(() => { void api<{ bpm: number; beats: number; volume: number; running: boolean }>("/api/metronome").then((settings) => { setBpm(settings.bpm); setBpmInput(String(settings.bpm)); setBeats(settings.beats); setVolume(settings.volume); setRunning(settings.running); setLoaded(true); }).catch(() => setLoaded(true)); }, []);
+  useEffect(() => { if (loaded) void api("/api/metronome", { method: "PUT", body: JSON.stringify({ bpm, beats, volume }) }).catch(() => undefined); }, [bpm, beats, volume, loaded]);
 
-  useEffect(() => () => { if (timer.current !== null) window.clearInterval(timer.current); void audio.current?.close(); }, []);
-  function click(nextBeat: number) {
-    if (!audio.current) audio.current = new AudioContext();
-    const oscillator = audio.current.createOscillator();
-    const gain = audio.current.createGain();
-    oscillator.frequency.value = nextBeat === 0 ? 1100 : 750;
-    gain.gain.setValueAtTime(0.18, audio.current.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, audio.current.currentTime + 0.06);
-    oscillator.connect(gain).connect(audio.current.destination);
-    oscillator.start(); oscillator.stop(audio.current.currentTime + 0.07);
-  }
-  function toggle() {
+  useEffect(() => () => { if (timer.current !== null) window.clearInterval(timer.current); }, []);
+  async function toggle() {
     if (running) {
       if (timer.current !== null) window.clearInterval(timer.current);
-      timer.current = null; setRunning(false); setBeat(-1); return;
+      timer.current = null;
+      try { await api("/api/metronome/command", { method: "POST", body: JSON.stringify({ action: "stop" }) }); setRunning(false); setBeat(-1); } catch (caught) { setError(caught instanceof Error ? caught.message : "服务器节拍器停止失败"); }
+      return;
     }
-    const tick = (next: number) => { setBeat(next); click(next); };
-    tick(0); timer.current = window.setInterval(() => setBeat((current) => { const next = (current + 1) % beats; click(next); return next; }), 60000 / bpm);
-    setRunning(true);
+    try {
+      await api("/api/metronome/command", { method: "POST", body: JSON.stringify({ action: "start", bpm, beats }) });
+      setError(""); setBeat(0); setRunning(true);
+    } catch (caught) { setError(caught instanceof Error ? caught.message : "服务器节拍器启动失败"); }
   }
   useEffect(() => {
     if (!running) return;
     if (timer.current !== null) window.clearInterval(timer.current);
-    timer.current = window.setInterval(() => setBeat((current) => { const next = (current + 1) % beats; click(next); return next; }), 60000 / bpm);
+    timer.current = window.setInterval(() => setBeat((current) => (current + 1) % beats), 60000 / bpm);
     return () => { if (timer.current !== null) window.clearInterval(timer.current); };
   }, [bpm, beats, running]);
   return <section className="metronome-panel">
     <div className="section-heading"><h2>节拍器</h2><span>练习工具</span></div>
     <div className="metronome-beats">{Array.from({ length: beats }, (_, index) => <i className={index === beat ? "active" : ""} key={index} />)}</div>
+    <TempoKnob value={bpm} onChange={changeBpm} />
     <output className="bpm-display">{bpm}<small>BPM</small></output>
-    <label className="bpm-control">速度 <input type="range" min="30" max="240" value={bpm} onChange={(event) => setBpm(Number(event.target.value))} /></label>
-    <div className="metronome-options"><label>拍号 <select value={beats} onChange={(event) => setBeats(Number(event.target.value))}>{[2, 3, 4, 5, 6, 7, 8].map((value) => <option key={value} value={value}>{value}/4</option>)}</select></label><button className="primary" onClick={toggle}>{running ? "暂停" : "开始"}</button></div>
+    <p className="tempo-section">{section.name}<small>{section.chinese} · {section.min}–{section.max} BPM</small></p>
+    <label className="bpm-control">直接输入 <input className="bpm-number" type="text" inputMode="numeric" value={bpmInput} onChange={(event) => { const next = event.target.value; setBpmInput(next); if (/^\d+$/.test(next)) { const numeric = Number(next); if (numeric >= 30 && numeric <= 240) setBpm(numeric); } }} onBlur={() => changeBpm(Number(bpmInput) || bpm)} /> BPM</label>
+    <label className="bpm-control">音量 <input type="range" min="0" max="100" value={volume} onChange={(event) => setVolume(Number(event.target.value))} /></label>
+    <div className="metronome-options"><label>拍号 <select value={beats} onChange={(event) => setBeats(Number(event.target.value))}>{[2, 3, 4, 5, 6, 7, 8].map((value) => <option key={value} value={value}>{value}/4</option>)}</select></label><button className="primary" onClick={() => void toggle()}>{running ? "暂停" : "开始"}</button></div>
+    {error && <p className="error" role="alert">{error}</p>}
   </section>;
 }
 

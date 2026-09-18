@@ -16,12 +16,14 @@ from fastapi.responses import PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .server_logging import TelemetryMiddleware
 from .config import Config, load_config
 from .database import Database
 from .library import ArchivedDuplicateError, DuplicateSongError, Library, LibraryError, SongNotFoundError, complete_local_path
 from .jobs import JobError, JobManager, JobNotFoundError, JobStore, TERMINAL_STATUSES
 from .recorder import RecorderError, RecorderManager
 from .playback import ServerPlaybackError, ServerPlayer
+from .metronome import ServerMetronome, ServerMetronomeError
 
 
 class LocalImport(BaseModel):
@@ -73,6 +75,14 @@ class ServerPlayerCommand(BaseModel):
 class MetronomeSettings(BaseModel):
     bpm: int = Field(ge=30, le=240)
     beats: int = Field(ge=2, le=8)
+    volume: int = Field(default=100, ge=0, le=100)
+
+
+class MetronomeCommand(BaseModel):
+    action: str
+    bpm: int = Field(default=100, ge=30, le=240)
+    beats: int = Field(default=4, ge=2, le=8)
+    volume: int = Field(default=100, ge=0, le=100)
 
 
 def requested_byte_range(value: str | None, size: int) -> tuple[int, int] | None:
@@ -153,6 +163,11 @@ def server_player() -> ServerPlayer:
     return ServerPlayer(services()[0].library_dir)
 
 
+@lru_cache
+def server_metronome() -> ServerMetronome:
+    return ServerMetronome(services()[0].library_dir)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     manager = job_manager()
@@ -161,6 +176,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         server_player().shutdown()
+        server_metronome().shutdown()
         recorder_manager().shutdown()
         manager.stop()
 
@@ -222,6 +238,7 @@ def write_items(items: list[str]) -> None:
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Drummer Buddy", version="0.1.0", lifespan=lifespan)
+    app.add_middleware(TelemetryMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -238,14 +255,34 @@ def create_app() -> FastAPI:
     async def get_metronome() -> dict:
         with services()[1].database.connect() as connection:
             row = connection.execute("SELECT value_json FROM app_settings WHERE key = 'metronome'").fetchone()
-        return json.loads(row["value_json"]) if row else {"bpm": 100, "beats": 4}
+        settings = json.loads(row["value_json"]) if row else {"bpm": 100, "beats": 4, "volume": 100}
+        settings.setdefault("volume", 100)
+        return {**settings, "running": server_metronome().status()["running"]}
 
     @app.put("/api/metronome")
     async def save_metronome(request: MetronomeSettings) -> dict:
         value = request.model_dump_json()
         with services()[1].database.connect() as connection:
             connection.execute("INSERT INTO app_settings(key, value_json) VALUES('metronome', ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json", (value,))
+        if server_metronome().status()["running"]:
+            try:
+                server_metronome().start(request.bpm, request.beats, request.volume)
+            except ServerMetronomeError as error:
+                raise HTTPException(status_code=503, detail=str(error)) from error
         return request.model_dump()
+
+    @app.post("/api/metronome/command")
+    async def command_metronome(request: MetronomeCommand) -> dict:
+        try:
+            if request.action == "start":
+                return server_metronome().start(request.bpm, request.beats, request.volume)
+            if request.action == "stop":
+                return server_metronome().stop()
+            if request.action == "volume":
+                return server_metronome().set_volume(request.volume)
+            raise ServerMetronomeError("unsupported metronome command")
+        except ServerMetronomeError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
 
     @app.get("/api/practice")
     async def get_practice() -> dict[str, list[str]]:
